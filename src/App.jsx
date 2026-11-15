@@ -13,6 +13,9 @@ import WorkshopManagerView from './components/WorkshopManagerView';
 import ClientPortalView from './components/ClientPortalView';
 import SchematicModal from './components/SchematicModal';
 
+const SESSION_STORAGE_KEY = 'autogest_active_user';
+const ENDPOINT_STORAGE_KEY = 'autogest_active_endpoint';
+
 const ROLE_DEFAULT_ENDPOINTS = {
   recepcionista: '/recepcion/clientes-y-vehiculos',
   mecanico: '/taller/foso-y-ordenes',
@@ -20,21 +23,59 @@ const ROLE_DEFAULT_ENDPOINTS = {
   cliente: '/portal-cliente/historial-y-alertas'
 };
 
+function getCacheKey(user) {
+  return `autogest_cache_${user.id}`;
+}
+
+function readLocalCache(user) {
+  if (!user) return null;
+  try {
+    const raw = localStorage.getItem(getCacheKey(user));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalCache(user, data) {
+  if (!user) return;
+  try {
+    localStorage.setItem(getCacheKey(user), JSON.stringify(data));
+  } catch {
+    // Ignorar si se excede cuota de almacenamiento local
+  }
+}
+
 export default function App() {
-  const [currentUser, setCurrentUser] = useState(null);
-  const [currentEndpoint, setCurrentEndpoint] = useState('/acceso');
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem(SESSION_STORAGE_KEY);
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const [currentEndpoint, setCurrentEndpoint] = useState(() => {
+    return localStorage.getItem(ENDPOINT_STORAGE_KEY) || '/acceso';
+  });
+
   const [loginError, setLoginError] = useState('');
-  const [tenants, setTenants] = useState([]);
-  const [clients, setClients] = useState([]);
-  const [vehicles, setVehicles] = useState([]);
-  const [orders, setOrders] = useState([]);
-  const [alerts, setAlerts] = useState([]);
+
+  // Inicializar estados directamente desde el caché local del usuario para que estén disponibles sin conexión
+  const [tenants, setTenants] = useState(() => readLocalCache(currentUser)?.tenants || []);
+  const [clients, setClients] = useState(() => readLocalCache(currentUser)?.clients || []);
+  const [vehicles, setVehicles] = useState(() => readLocalCache(currentUser)?.vehicles || []);
+  const [orders, setOrders] = useState(() => readLocalCache(currentUser)?.orders || []);
+  const [alerts, setAlerts] = useState(() => readLocalCache(currentUser)?.alerts || []);
+
   const [selectedSchematic, setSelectedSchematic] = useState(null);
-  const [isOffline, setIsOffline] = useState(!navigator.onLine);
+  const [isOffline, setIsOffline] = useState(() => !navigator.onLine);
   const [pendingCount, setPendingCount] = useState(0);
 
   const navigateEndpoint = useCallback((path) => {
     setCurrentEndpoint(path);
+    localStorage.setItem(ENDPOINT_STORAGE_KEY, path);
     window.history.replaceState({}, '', path);
   }, []);
 
@@ -43,62 +84,129 @@ export default function App() {
     setPendingCount(list.length);
   }, []);
 
+  // Escuchar cambios reales de conexión Wi-Fi / Datos móviles en el teléfono
+  useEffect(() => {
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => setIsOffline(true);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Sincronizar el caché local cada vez que cambian los datos en memoria
+  useEffect(() => {
+    if (!currentUser) return;
+    writeLocalCache(currentUser, { tenants, clients, vehicles, orders, alerts });
+  }, [currentUser, tenants, clients, vehicles, orders, alerts]);
+
   const loadRoleData = useCallback(async (user) => {
-    if (!user || isOffline) return;
+    if (!user) return;
 
-    if (user.rol === 'cliente') {
-      const { data: clientRows } = await supabase
-        .from('clientes')
-        .select('*')
-        .eq('email', user.email)
-        .eq('activo', true);
+    // 1. Cargar primero desde caché local por si estamos sin señal al abrir o recargar la PWA
+    const cached = readLocalCache(user);
+    if (cached) {
+      setTenants(cached.tenants || []);
+      setClients(cached.clients || []);
+      setVehicles(cached.vehicles || []);
+      setOrders(cached.orders || []);
+      setAlerts(cached.alerts || []);
+    }
 
-      if (!clientRows || clientRows.length === 0) {
-        setTenants([]);
-        setVehicles([]);
-        setOrders([]);
-        setAlerts([]);
-        return;
+    if (isOffline || !navigator.onLine) {
+      setIsOffline(true);
+      return;
+    }
+
+    try {
+      if (user.rol === 'cliente') {
+        const { data: clientRows, error: errCli } = await supabase
+          .from('clientes')
+          .select('*')
+          .eq('email', user.email)
+          .eq('activo', true);
+
+        if (errCli) throw errCli;
+
+        if (!clientRows || clientRows.length === 0) {
+          setTenants([]);
+          setVehicles([]);
+          setOrders([]);
+          setAlerts([]);
+          return;
+        }
+
+        const tallerIds = [...new Set(clientRows.map((c) => c.taller_id))];
+        const clienteIds = clientRows.map((c) => c.id);
+
+        const [tRes, vRes] = await Promise.all([
+          supabase.from('talleres').select('*').in('id', tallerIds),
+          supabase.from('vehiculos').select('*').in('cliente_id', clienteIds)
+        ]);
+
+        if (tRes.error) throw tRes.error;
+        if (vRes.error) throw vRes.error;
+
+        const vehiculoIds = (vRes.data || []).map((v) => v.id);
+
+        const [oRes, aRes] = await Promise.all([
+          vehiculoIds.length > 0
+            ? supabase.from('ordenes_trabajo').select('*').in('vehiculo_id', vehiculoIds).order('creado_en', { ascending: false })
+            : Promise.resolve({ data: [] }),
+          vehiculoIds.length > 0
+            ? supabase.from('alertas_preventivas').select('*').in('vehiculo_id', vehiculoIds).order('fecha_vencimiento', { ascending: true })
+            : Promise.resolve({ data: [] })
+        ]);
+
+        const freshData = {
+          clients: clientRows,
+          tenants: tRes.data || [],
+          vehicles: vRes.data || [],
+          orders: oRes.data || [],
+          alerts: aRes.data || []
+        };
+
+        setClients(freshData.clients);
+        setTenants(freshData.tenants);
+        setVehicles(freshData.vehicles);
+        setOrders(freshData.orders);
+        setAlerts(freshData.alerts);
+        writeLocalCache(user, freshData);
+      } else {
+        const [tRes, cRes, vRes, oRes, aRes] = await Promise.all([
+          supabase.from('talleres').select('*').eq('id', user.taller_id),
+          supabase.from('clientes').select('*').eq('taller_id', user.taller_id).order('creado_en', { ascending: false }),
+          supabase.from('vehiculos').select('*').eq('taller_id', user.taller_id).order('creado_en', { ascending: false }),
+          supabase.from('ordenes_trabajo').select('*').eq('taller_id', user.taller_id).order('creado_en', { ascending: false }),
+          supabase.from('alertas_preventivas').select('*').eq('taller_id', user.taller_id).order('fecha_vencimiento', { ascending: true })
+        ]);
+
+        if (tRes.error || cRes.error || vRes.error || oRes.error || aRes.error) {
+          throw new Error('Sin conexión con el servidor');
+        }
+
+        const freshData = {
+          tenants: tRes.data || [],
+          clients: cRes.data || [],
+          vehicles: vRes.data || [],
+          orders: oRes.data || [],
+          alerts: aRes.data || []
+        };
+
+        setTenants(freshData.tenants);
+        setClients(freshData.clients);
+        setVehicles(freshData.vehicles);
+        setOrders(freshData.orders);
+        setAlerts(freshData.alerts);
+        writeLocalCache(user, freshData);
       }
-
-      const tallerIds = [...new Set(clientRows.map((c) => c.taller_id))];
-      const clienteIds = clientRows.map((c) => c.id);
-
-      const [tRes, vRes] = await Promise.all([
-        supabase.from('talleres').select('*').in('id', tallerIds),
-        supabase.from('vehiculos').select('*').in('cliente_id', clienteIds)
-      ]);
-
-      const vehiculoIds = (vRes.data || []).map((v) => v.id);
-
-      const [oRes, aRes] = await Promise.all([
-        vehiculoIds.length > 0
-          ? supabase.from('ordenes_trabajo').select('*').in('vehiculo_id', vehiculoIds).order('creado_en', { ascending: false })
-          : Promise.resolve({ data: [] }),
-        vehiculoIds.length > 0
-          ? supabase.from('alertas_preventivas').select('*').in('vehiculo_id', vehiculoIds).order('fecha_vencimiento', { ascending: true })
-          : Promise.resolve({ data: [] })
-      ]);
-
-      setClients(clientRows);
-      setTenants(tRes.data || []);
-      setVehicles(vRes.data || []);
-      setOrders(oRes.data || []);
-      setAlerts(aRes.data || []);
-    } else {
-      const [tRes, cRes, vRes, oRes, aRes] = await Promise.all([
-        supabase.from('talleres').select('*').eq('id', user.taller_id),
-        supabase.from('clientes').select('*').eq('taller_id', user.taller_id).order('creado_en', { ascending: false }),
-        supabase.from('vehiculos').select('*').eq('taller_id', user.taller_id).order('creado_en', { ascending: false }),
-        supabase.from('ordenes_trabajo').select('*').eq('taller_id', user.taller_id).order('creado_en', { ascending: false }),
-        supabase.from('alertas_preventivas').select('*').eq('taller_id', user.taller_id).order('fecha_vencimiento', { ascending: true })
-      ]);
-
-      setTenants(tRes.data || []);
-      setClients(cRes.data || []);
-      setVehicles(vRes.data || []);
-      setOrders(oRes.data || []);
-      setAlerts(aRes.data || []);
+    } catch {
+      // Si la petición falla por caída silenciosa de red en el celular, pasar a modo Offline manteniendo el caché
+      setIsOffline(true);
     }
   }, [isOffline]);
 
@@ -119,22 +227,31 @@ export default function App() {
 
   const handleLogin = async (email, password) => {
     setLoginError('');
-    const { data, error } = await supabase
-      .from('usuarios')
-      .select('*')
-      .eq('email', email)
-      .eq('password', password)
-      .maybeSingle();
+    try {
+      const { data, error } = await supabase
+        .from('usuarios')
+        .select('*')
+        .eq('email', email)
+        .eq('password', password)
+        .maybeSingle();
 
-    if (error || !data) {
-      setLoginError('Credenciales incorrectas. Si eres cliente nuevo, tu contraseña inicial es tu número de DNI.');
-      return;
+      if (error || !data) {
+        setLoginError('Credenciales incorrectas. Si eres cliente nuevo, tu contraseña inicial es tu número de DNI.');
+        return;
+      }
+
+      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(data));
+      setCurrentUser(data);
+      const targetEndpoint = ROLE_DEFAULT_ENDPOINTS[data.rol] || '/panel';
+      navigateEndpoint(targetEndpoint);
+    } catch {
+      setLoginError('No hay conexión a internet para validar el inicio de sesión inicial.');
     }
-    setCurrentUser(data);
-    navigateEndpoint(ROLE_DEFAULT_ENDPOINTS[data.rol] || '/panel');
   };
 
   const handleLogout = () => {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+    localStorage.removeItem(ENDPOINT_STORAGE_KEY);
     setCurrentUser(null);
     navigateEndpoint('/acceso');
   };
@@ -169,36 +286,98 @@ export default function App() {
 
   const handleCreateVehicle = async (payload) => {
     const record = { ...payload, taller_id: currentUser.taller_id };
-    if (isOffline) {
+    const optimisticVehicle = {
+      ...record,
+      id: crypto.randomUUID(),
+      titulo_esquema: 'Esquema Eléctrico ECU / Inyección Electrónica',
+      creado_en: new Date().toISOString()
+    };
+
+    if (isOffline || !navigator.onLine) {
+      setIsOffline(true);
       await enqueueOfflineMutation({ table: 'vehiculos', action: 'INSERT', payload: record });
-      setVehicles((prev) => [{ ...record, id: crypto.randomUUID() }, ...prev]);
+      setVehicles((prev) => [optimisticVehicle, ...prev]);
       await refreshQueueCount();
       return;
     }
-    await supabase.from('vehiculos').insert([record]);
-    await loadRoleData(currentUser);
+
+    try {
+      const { error } = await supabase.from('vehiculos').insert([record]);
+      if (error) throw error;
+      await loadRoleData(currentUser);
+    } catch {
+      setIsOffline(true);
+      await enqueueOfflineMutation({ table: 'vehiculos', action: 'INSERT', payload: record });
+      setVehicles((prev) => [optimisticVehicle, ...prev]);
+      await refreshQueueCount();
+    }
   };
 
   const handleUpdateVehicleMileage = async (vehicleId, kilometraje) => {
-    await supabase.from('vehiculos').update({ kilometraje }).eq('id', vehicleId);
-    await loadRoleData(currentUser);
+    setVehicles((prev) => prev.map((v) => (v.id === vehicleId ? { ...v, kilometraje } : v)));
+
+    if (isOffline || !navigator.onLine) {
+      setIsOffline(true);
+      await enqueueOfflineMutation({
+        table: 'vehiculos',
+        action: 'UPDATE',
+        match: { id: vehicleId },
+        payload: { kilometraje }
+      });
+      await refreshQueueCount();
+      return;
+    }
+
+    try {
+      const { error } = await supabase.from('vehiculos').update({ kilometraje }).eq('id', vehicleId);
+      if (error) throw error;
+      await loadRoleData(currentUser);
+    } catch {
+      setIsOffline(true);
+      await enqueueOfflineMutation({
+        table: 'vehiculos',
+        action: 'UPDATE',
+        match: { id: vehicleId },
+        payload: { kilometraje }
+      });
+      await refreshQueueCount();
+    }
   };
 
   const handleCreateOrder = async (payload) => {
     const record = { ...payload, taller_id: currentUser.taller_id, estado: 'pendiente' };
-    if (isOffline) {
+    const optimisticOrder = {
+      ...record,
+      id: crypto.randomUUID(),
+      creado_en: new Date().toISOString()
+    };
+
+    if (isOffline || !navigator.onLine) {
+      setIsOffline(true);
       await enqueueOfflineMutation({ table: 'ordenes_trabajo', action: 'INSERT', payload: record });
-      setOrders((prev) => [{ ...record, id: crypto.randomUUID(), creado_en: new Date().toISOString() }, ...prev]);
+      setOrders((prev) => [optimisticOrder, ...prev]);
       await refreshQueueCount();
       return;
     }
-    await supabase.from('ordenes_trabajo').insert([record]);
-    await loadRoleData(currentUser);
+
+    try {
+      const { error } = await supabase.from('ordenes_trabajo').insert([record]);
+      if (error) throw error;
+      await loadRoleData(currentUser);
+    } catch {
+      // Si se cortó la red con la app abierta, pasar a Modo Foso y encolar en IndexedDB sin perder la OT
+      setIsOffline(true);
+      await enqueueOfflineMutation({ table: 'ordenes_trabajo', action: 'INSERT', payload: record });
+      setOrders((prev) => [optimisticOrder, ...prev]);
+      await refreshQueueCount();
+    }
   };
 
   const handleUpdateOrder = async (orderId, changes) => {
     setOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, ...changes } : o)));
-    if (isOffline) {
+
+    if (isOffline || !navigator.onLine) {
+      setIsOffline(true);
       await enqueueOfflineMutation({
         table: 'ordenes_trabajo',
         action: 'UPDATE',
@@ -208,23 +387,42 @@ export default function App() {
       await refreshQueueCount();
       return;
     }
-    await supabase.from('ordenes_trabajo').update(changes).eq('id', orderId);
-    await loadRoleData(currentUser);
+
+    try {
+      const { error } = await supabase.from('ordenes_trabajo').update(changes).eq('id', orderId);
+      if (error) throw error;
+      await loadRoleData(currentUser);
+    } catch {
+      setIsOffline(true);
+      await enqueueOfflineMutation({
+        table: 'ordenes_trabajo',
+        action: 'UPDATE',
+        match: { id: orderId },
+        payload: changes
+      });
+      await refreshQueueCount();
+    }
   };
 
   const handleSyncOfflineQueue = async () => {
-    if (isOffline) return;
-    const queue = await getPendingMutations();
-    for (const item of queue) {
-      if (item.action === 'INSERT') {
-        await supabase.from(item.table).insert([item.payload]);
-      } else if (item.action === 'UPDATE') {
-        await supabase.from(item.table).update(item.payload).match(item.match);
+    if (isOffline || !navigator.onLine) return;
+    try {
+      const queue = await getPendingMutations();
+      for (const item of queue) {
+        if (item.action === 'INSERT') {
+          const { error } = await supabase.from(item.table).insert([item.payload]);
+          if (error) throw error;
+        } else if (item.action === 'UPDATE') {
+          const { error } = await supabase.from(item.table).update(item.payload).match(item.match);
+          if (error) throw error;
+        }
+        await clearMutationById(item.id);
       }
-      await clearMutationById(item.id);
+      await refreshQueueCount();
+      await loadRoleData(currentUser);
+    } catch {
+      setIsOffline(true);
     }
-    await refreshQueueCount();
-    await loadRoleData(currentUser);
   };
 
   if (!currentUser) {
@@ -246,6 +444,7 @@ export default function App() {
         setIsOffline={setIsOffline}
         pendingCount={pendingCount}
         onSyncNow={handleSyncOfflineQueue}
+        onRefreshData={() => loadRoleData(currentUser)}
         onLogout={handleLogout}
       />
 

@@ -15,6 +15,7 @@ export default function Navbar({
   setIsOffline,
   pendingCount,
   onSyncNow,
+  onRefreshData,
   onLogout
 }) {
   return (
@@ -42,7 +43,18 @@ export default function Navbar({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2">
+          {!isOffline && (
+            <button
+              onClick={onRefreshData}
+              title="Actualizar datos desde el servidor"
+              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded-lg text-xs font-semibold"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Actualizar
+            </button>
+          )}
+
           {currentUser.rol !== 'cliente' && (
             <button
               onClick={() => setIsOffline(!isOffline)}
