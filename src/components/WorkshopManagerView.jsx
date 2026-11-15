@@ -1,5 +1,11 @@
 import { useState } from 'react';
-import { ClipboardList, Plus, Trash2, Bell, Calendar } from 'lucide-react';
+import { ClipboardList, Plus, Trash2, Bell, Calendar, AlertCircle } from 'lucide-react';
+import {
+  sanitizeOnlyDigits,
+  sanitizeTextSpec,
+  validateWorkOrderData,
+  validateSparePart
+} from '../services/validators';
 
 export default function WorkshopManagerView({
   orders,
@@ -9,6 +15,7 @@ export default function WorkshopManagerView({
   onUpdateOrder
 }) {
   const [selectedOt, setSelectedOt] = useState(null);
+  const [errorMsg, setErrorMsg] = useState('');
   const [form, setForm] = useState({
     vehiculo_id: '',
     sector: 'Foso / Tren Delantero',
@@ -21,11 +28,17 @@ export default function WorkshopManagerView({
   const [partDraft, setPartDraft] = useState({ nombre: '', costo: '', vida_util_meses: 12 });
 
   const addPartToDraft = () => {
-    if (!partDraft.nombre) return;
+    setErrorMsg('');
+    const partError = validateSparePart(partDraft);
+    if (partError) {
+      setErrorMsg(partError);
+      return;
+    }
+
     setParts([
       ...parts,
       {
-        nombre: partDraft.nombre,
+        nombre: partDraft.nombre.trim(),
         costo: Number(partDraft.costo) || 0,
         vida_util_meses: Number(partDraft.vida_util_meses) || 12
       }
@@ -38,6 +51,7 @@ export default function WorkshopManagerView({
   };
 
   const startAssigningExistingOt = (ot) => {
+    setErrorMsg('');
     setSelectedOt(ot);
     setForm({
       vehiculo_id: ot.vehiculo_id,
@@ -52,15 +66,28 @@ export default function WorkshopManagerView({
 
   const handleSubmit = (e) => {
     e.preventDefault();
+    setErrorMsg('');
+
     const payload = {
-      vehiculo_id: form.vehiculo_id || vehicles[0]?.id,
+      vehiculo_id: form.vehiculo_id || vehicles[0]?.id || '',
       sector: form.sector,
-      diagnostico: form.diagnostico,
-      reparaciones_asignadas: form.reparaciones_asignadas,
+      diagnostico: form.diagnostico.trim(),
+      reparaciones_asignadas: form.reparaciones_asignadas.trim(),
       costo_mano_obra: Number(form.costo_mano_obra) || 0,
       repuestos_utilizados: parts,
       dias_preventivo: Number(form.dias_preventivo) || 180
     };
+
+    const validationError = validateWorkOrderData(payload);
+    if (validationError) {
+      setErrorMsg(validationError);
+      return;
+    }
+
+    if ((payload.reparaciones_asignadas || '').length < 5) {
+      setErrorMsg('Especifica las reparaciones asignadas al mecánico (mínimo 5 caracteres).');
+      return;
+    }
 
     if (selectedOt) {
       onUpdateOrder(selectedOt.id, payload);
@@ -82,6 +109,16 @@ export default function WorkshopManagerView({
 
   return (
     <div className="space-y-6">
+      {errorMsg && (
+        <div className="bg-red-950/90 border border-red-700 text-red-200 px-4 py-3 rounded-xl text-sm flex items-center justify-between">
+          <span className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+            {errorMsg}
+          </span>
+          <button onClick={() => setErrorMsg('')} className="text-xs underline ml-4">Cerrar</button>
+        </div>
+      )}
+
       <div className="grid lg:grid-cols-3 gap-6">
         <form onSubmit={handleSubmit} className="bg-slate-900 border border-slate-800 p-5 rounded-xl space-y-3 h-fit">
           <h2 className="text-white font-bold text-base flex items-center gap-2">
@@ -112,9 +149,9 @@ export default function WorkshopManagerView({
           </select>
 
           <textarea
-            placeholder="Diagnóstico general..."
+            placeholder="Diagnóstico general (mín. 10 caracteres)..."
             value={form.diagnostico}
-            onChange={(e) => setForm({ ...form, diagnostico: e.target.value })}
+            onChange={(e) => setForm({ ...form, diagnostico: e.target.value.slice(0, 500) })}
             className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
             rows={2}
             required
@@ -123,7 +160,7 @@ export default function WorkshopManagerView({
           <textarea
             placeholder="Reparaciones asignadas e instrucciones para el mecánico..."
             value={form.reparaciones_asignadas}
-            onChange={(e) => setForm({ ...form, reparaciones_asignadas: e.target.value })}
+            onChange={(e) => setForm({ ...form, reparaciones_asignadas: e.target.value.slice(0, 500) })}
             className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
             rows={2}
             required
@@ -133,19 +170,21 @@ export default function WorkshopManagerView({
             <div>
               <label className="text-xs text-slate-400">Mano de Obra ($)</label>
               <input
-                type="number"
+                type="text"
+                inputMode="numeric"
                 value={form.costo_mano_obra}
-                onChange={(e) => setForm({ ...form, costo_mano_obra: e.target.value })}
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white mt-1"
+                onChange={(e) => setForm({ ...form, costo_mano_obra: sanitizeOnlyDigits(e.target.value, 8) })}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono mt-1"
               />
             </div>
             <div>
               <label className="text-xs text-slate-400">Próximo Service (días)</label>
               <input
-                type="number"
+                type="text"
+                inputMode="numeric"
                 value={form.dias_preventivo}
-                onChange={(e) => setForm({ ...form, dias_preventivo: e.target.value })}
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white mt-1"
+                onChange={(e) => setForm({ ...form, dias_preventivo: sanitizeOnlyDigits(e.target.value, 4) })}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono mt-1"
               />
             </div>
           </div>
@@ -156,23 +195,25 @@ export default function WorkshopManagerView({
               type="text"
               placeholder="Nombre del repuesto (Ej: Kit Distribución)"
               value={partDraft.nombre}
-              onChange={(e) => setPartDraft({ ...partDraft, nombre: e.target.value })}
+              onChange={(e) => setPartDraft({ ...partDraft, nombre: sanitizeTextSpec(e.target.value, 50) })}
               className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white"
             />
             <div className="grid grid-cols-2 gap-2">
               <input
-                type="number"
+                type="text"
+                inputMode="numeric"
                 placeholder="Costo ($)"
                 value={partDraft.costo}
-                onChange={(e) => setPartDraft({ ...partDraft, costo: e.target.value })}
-                className="bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white"
+                onChange={(e) => setPartDraft({ ...partDraft, costo: sanitizeOnlyDigits(e.target.value, 8) })}
+                className="bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white font-mono"
               />
               <input
-                type="number"
-                placeholder="Vida útil (meses)"
+                type="text"
+                inputMode="numeric"
+                placeholder="Vida útil (1-120 meses)"
                 value={partDraft.vida_util_meses}
-                onChange={(e) => setPartDraft({ ...partDraft, vida_util_meses: e.target.value })}
-                className="bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white"
+                onChange={(e) => setPartDraft({ ...partDraft, vida_util_meses: sanitizeOnlyDigits(e.target.value, 3) })}
+                className="bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white font-mono"
               />
             </div>
             <button

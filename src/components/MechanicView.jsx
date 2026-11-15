@@ -1,5 +1,13 @@
 import { useState } from 'react';
-import { Search, Wrench, FileText, CheckCircle2, Clock, PlusCircle, Car } from 'lucide-react';
+import { Search, Wrench, FileText, CheckCircle2, Clock, PlusCircle, Car, AlertCircle } from 'lucide-react';
+import {
+  sanitizePlate,
+  sanitizeVin,
+  sanitizeOnlyDigits,
+  sanitizeTextSpec,
+  validateVehicleData,
+  validateWorkOrderData
+} from '../services/validators';
 
 export default function MechanicView({
   currentUser,
@@ -16,6 +24,7 @@ export default function MechanicView({
   const [activeSubTab, setActiveSubTab] = useState('sector_tasks');
   const [searchPlate, setSearchPlate] = useState('');
   const [sectorFilter, setSectorFilter] = useState(currentUser.sector || 'TODOS');
+  const [errorMsg, setErrorMsg] = useState('');
 
   const [vehicleForm, setVehicleForm] = useState({
     cliente_id: '',
@@ -46,32 +55,55 @@ export default function MechanicView({
   );
 
   const switchTab = (tab, endpoint) => {
+    setErrorMsg('');
     setActiveSubTab(tab);
     onRouteChange(endpoint);
   };
 
   const handleCreateVehicleSubmit = (e) => {
     e.preventDefault();
-    const targetClient = vehicleForm.cliente_id || clients[0]?.id;
-    if (!targetClient) return;
-    onCreateVehicle({
+    setErrorMsg('');
+
+    const payload = {
       ...vehicleForm,
-      cliente_id: targetClient,
-      patente: vehicleForm.patente.toUpperCase().trim(),
-      kilometraje: Number(vehicleForm.kilometraje) || 0
+      cliente_id: vehicleForm.cliente_id || clients[0]?.id || ''
+    };
+
+    const validationError = validateVehicleData(payload, vehicles);
+    if (validationError) {
+      setErrorMsg(validationError);
+      return;
+    }
+
+    onCreateVehicle({
+      ...payload,
+      patente: payload.patente.toUpperCase().trim(),
+      vin: payload.vin.toUpperCase().trim(),
+      kilometraje: Number(payload.kilometraje) || 0
     });
     setVehicleForm({ cliente_id: '', patente: '', vin: '', marca: '', modelo: '', motorizacion: '', kilometraje: '' });
   };
 
   const handleCreateOtSubmit = (e) => {
     e.preventDefault();
-    const targetVehicle = otForm.vehiculo_id || vehicles[0]?.id;
-    if (!targetVehicle || !otForm.diagnostico) return;
+    setErrorMsg('');
+
+    const targetVehicle = otForm.vehiculo_id || vehicles[0]?.id || '';
+    const validationError = validateWorkOrderData({
+      vehiculo_id: targetVehicle,
+      diagnostico: otForm.diagnostico
+    });
+
+    if (validationError) {
+      setErrorMsg(validationError);
+      return;
+    }
+
     onCreateOrder({
       vehiculo_id: targetVehicle,
       sector: otForm.sector,
-      diagnostico: otForm.diagnostico,
-      reparaciones_asignadas: otForm.reparaciones_asignadas,
+      diagnostico: otForm.diagnostico.trim(),
+      reparaciones_asignadas: otForm.reparaciones_asignadas.trim(),
       costo_mano_obra: 0,
       repuestos_utilizados: []
     });
@@ -79,12 +111,40 @@ export default function MechanicView({
   };
 
   const saveDiagnosisEdit = (otId) => {
-    onUpdateOrder(otId, { diagnostico: editDiagnosis });
+    if (editDiagnosis.trim().length < 10) {
+      setErrorMsg('El diagnóstico debe tener al menos 10 caracteres.');
+      return;
+    }
+    setErrorMsg('');
+    onUpdateOrder(otId, { diagnostico: editDiagnosis.trim() });
     setEditingOtId(null);
+  };
+
+  const handleMileageUpdatePrompt = (vehicle) => {
+    const raw = prompt(`Actualizar kilometraje actual para ${vehicle.patente} (mínimo ${vehicle.kilometraje} km):`, vehicle.kilometraje);
+    if (raw === null) return;
+    const cleaned = raw.replace(/\D/g, '');
+    const newKm = Number(cleaned);
+    if (!cleaned || isNaN(newKm) || newKm < vehicle.kilometraje || newKm > 2000000) {
+      setErrorMsg(`Kilometraje inválido: debe ser numérico, entre ${vehicle.kilometraje.toLocaleString()} y 2.000.000 km.`);
+      return;
+    }
+    setErrorMsg('');
+    onUpdateVehicleMileage(vehicle.id, newKm);
   };
 
   return (
     <div className="space-y-6">
+      {errorMsg && (
+        <div className="bg-red-950/90 border border-red-700 text-red-200 px-4 py-3 rounded-xl text-sm flex items-center justify-between">
+          <span className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+            {errorMsg}
+          </span>
+          <button onClick={() => setErrorMsg('')} className="text-xs underline ml-4">Cerrar</button>
+        </div>
+      )}
+
       <div className="flex flex-wrap gap-2">
         <button
           onClick={() => switchTab('sector_tasks', '/taller/foso-y-ordenes')}
@@ -167,7 +227,7 @@ export default function MechanicView({
                       <div className="space-y-2">
                         <textarea
                           value={editDiagnosis}
-                          onChange={(e) => setEditDiagnosis(e.target.value)}
+                          onChange={(e) => setEditDiagnosis(e.target.value.slice(0, 500))}
                           className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white"
                           rows={2}
                         />
@@ -258,9 +318,9 @@ export default function MechanicView({
               <option>Motor y Distribución</option>
             </select>
             <textarea
-              placeholder="Diagnóstico inicial relevado..."
+              placeholder="Diagnóstico inicial relevado (mín. 10 caracteres)..."
               value={otForm.diagnostico}
-              onChange={(e) => setOtForm({ ...otForm, diagnostico: e.target.value })}
+              onChange={(e) => setOtForm({ ...otForm, diagnostico: e.target.value.slice(0, 500) })}
               className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
               rows={3}
               required
@@ -268,7 +328,7 @@ export default function MechanicView({
             <textarea
               placeholder="Tareas o reparaciones a efectuar..."
               value={otForm.reparaciones_asignadas}
-              onChange={(e) => setOtForm({ ...otForm, reparaciones_asignadas: e.target.value })}
+              onChange={(e) => setOtForm({ ...otForm, reparaciones_asignadas: e.target.value.slice(0, 500) })}
               className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
               rows={2}
             />
@@ -294,7 +354,7 @@ export default function MechanicView({
                 <input
                   type="text"
                   value={searchPlate}
-                  onChange={(e) => setSearchPlate(e.target.value)}
+                  onChange={(e) => setSearchPlate(sanitizePlate(e.target.value))}
                   placeholder="Ingresar dominio (Ej: AF123BC)..."
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-10 pr-4 py-2.5 text-white font-mono uppercase"
                 />
@@ -309,12 +369,7 @@ export default function MechanicView({
                       {v.patente}
                     </span>
                     <button
-                      onClick={() => {
-                        const newKm = prompt('Actualizar kilometraje actual:', v.kilometraje);
-                        if (newKm !== null && !isNaN(Number(newKm))) {
-                          onUpdateVehicleMileage(v.id, Number(newKm));
-                        }
-                      }}
+                      onClick={() => handleMileageUpdatePrompt(v)}
                       className="text-xs text-amber-400 hover:underline font-mono"
                     >
                       {v.kilometraje.toLocaleString()} km (Actualizar)
@@ -354,25 +409,25 @@ export default function MechanicView({
             </select>
             <input
               type="text"
-              placeholder="Dominio / Patente"
+              placeholder="Dominio / Patente (AF123BC / ABC123)"
               value={vehicleForm.patente}
-              onChange={(e) => setVehicleForm({ ...vehicleForm, patente: e.target.value })}
+              onChange={(e) => setVehicleForm({ ...vehicleForm, patente: sanitizePlate(e.target.value) })}
               className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white uppercase font-mono"
               required
             />
             <input
               type="text"
-              placeholder="VIN / Chasis"
+              placeholder="VIN / Chasis (8-17 caract. sin I, O, Q)"
               value={vehicleForm.vin}
-              onChange={(e) => setVehicleForm({ ...vehicleForm, vin: e.target.value })}
-              className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white font-mono"
+              onChange={(e) => setVehicleForm({ ...vehicleForm, vin: sanitizeVin(e.target.value) })}
+              className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white font-mono uppercase"
               required
             />
             <input
               type="text"
               placeholder="Marca"
               value={vehicleForm.marca}
-              onChange={(e) => setVehicleForm({ ...vehicleForm, marca: e.target.value })}
+              onChange={(e) => setVehicleForm({ ...vehicleForm, marca: sanitizeTextSpec(e.target.value, 30) })}
               className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
               required
             />
@@ -380,7 +435,7 @@ export default function MechanicView({
               type="text"
               placeholder="Modelo"
               value={vehicleForm.modelo}
-              onChange={(e) => setVehicleForm({ ...vehicleForm, modelo: e.target.value })}
+              onChange={(e) => setVehicleForm({ ...vehicleForm, modelo: sanitizeTextSpec(e.target.value, 35) })}
               className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
               required
             />
@@ -388,16 +443,17 @@ export default function MechanicView({
               type="text"
               placeholder="Motorización"
               value={vehicleForm.motorizacion}
-              onChange={(e) => setVehicleForm({ ...vehicleForm, motorizacion: e.target.value })}
+              onChange={(e) => setVehicleForm({ ...vehicleForm, motorizacion: sanitizeTextSpec(e.target.value, 35) })}
               className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
               required
             />
             <input
-              type="number"
+              type="text"
+              inputMode="numeric"
               placeholder="Kilometraje actual"
               value={vehicleForm.kilometraje}
-              onChange={(e) => setVehicleForm({ ...vehicleForm, kilometraje: e.target.value })}
-              className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
+              onChange={(e) => setVehicleForm({ ...vehicleForm, kilometraje: sanitizeOnlyDigits(e.target.value, 7) })}
+              className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white font-mono"
               required
             />
             <button

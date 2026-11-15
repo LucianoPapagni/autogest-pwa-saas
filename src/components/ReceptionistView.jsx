@@ -1,5 +1,15 @@
 import { useState } from 'react';
-import { UserPlus, Edit3, UserX, UserCheck, Car, PlusCircle, KeyRound } from 'lucide-react';
+import { UserPlus, Edit3, UserX, UserCheck, Car, PlusCircle, KeyRound, AlertCircle } from 'lucide-react';
+import {
+  sanitizeOnlyLetters,
+  sanitizeOnlyDigits,
+  sanitizePhone,
+  sanitizePlate,
+  sanitizeVin,
+  sanitizeTextSpec,
+  validateClientData,
+  validateVehicleData
+} from '../services/validators';
 
 export default function ReceptionistView({
   clients,
@@ -10,12 +20,15 @@ export default function ReceptionistView({
 }) {
   const [editingClient, setEditingClient] = useState(null);
   const [statusMsg, setStatusMsg] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
+
   const [clientForm, setClientForm] = useState({
     nombre_completo: '',
     dni: '',
     telefono: '',
     email: ''
   });
+
   const [vehicleForm, setVehicleForm] = useState({
     cliente_id: '',
     patente: '',
@@ -28,6 +41,23 @@ export default function ReceptionistView({
 
   const handleClientSubmit = async (e) => {
     e.preventDefault();
+    setErrorMsg('');
+    setStatusMsg('');
+
+    const validationError = validateClientData(clientForm);
+    if (validationError) {
+      setErrorMsg(validationError);
+      return;
+    }
+
+    const dniDuplicate = clients.some(
+      (c) => c.dni === clientForm.dni.trim() && c.id !== editingClient?.id
+    );
+    if (dniDuplicate) {
+      setErrorMsg(`Ya existe un cliente registrado en este taller con el DNI ${clientForm.dni}.`);
+      return;
+    }
+
     await onSaveClient(clientForm, editingClient?.id);
     if (!editingClient) {
       setStatusMsg(
@@ -41,6 +71,7 @@ export default function ReceptionistView({
   };
 
   const startEdit = (client) => {
+    setErrorMsg('');
     setEditingClient(client);
     setClientForm({
       nombre_completo: client.nombre_completo,
@@ -52,14 +83,28 @@ export default function ReceptionistView({
 
   const handleVehicleSubmit = (e) => {
     e.preventDefault();
-    const targetClientId = vehicleForm.cliente_id || clients[0]?.id;
-    if (!targetClientId) return;
-    onCreateVehicle({
+    setErrorMsg('');
+    setStatusMsg('');
+
+    const payload = {
       ...vehicleForm,
-      cliente_id: targetClientId,
-      patente: vehicleForm.patente.toUpperCase().trim(),
-      kilometraje: Number(vehicleForm.kilometraje) || 0
+      cliente_id: vehicleForm.cliente_id || clients.find((c) => c.activo)?.id || ''
+    };
+
+    const validationError = validateVehicleData(payload, vehicles);
+    if (validationError) {
+      setErrorMsg(validationError);
+      return;
+    }
+
+    onCreateVehicle({
+      ...payload,
+      patente: payload.patente.toUpperCase().trim(),
+      vin: payload.vin.toUpperCase().trim(),
+      kilometraje: Number(payload.kilometraje) || 0
     });
+
+    setStatusMsg(`Vehículo dominio ${payload.patente} vinculado correctamente.`);
     setVehicleForm({
       ...vehicleForm,
       patente: '',
@@ -73,13 +118,23 @@ export default function ReceptionistView({
 
   return (
     <div className="space-y-6">
+      {errorMsg && (
+        <div className="bg-red-950/90 border border-red-700 text-red-200 px-4 py-3 rounded-xl text-sm flex items-center justify-between">
+          <span className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+            {errorMsg}
+          </span>
+          <button onClick={() => setErrorMsg('')} className="text-xs underline ml-4">Cerrar</button>
+        </div>
+      )}
+
       {statusMsg && (
         <div className="bg-emerald-950/90 border border-emerald-700 text-emerald-200 px-4 py-3 rounded-xl text-sm flex items-center justify-between">
           <span className="flex items-center gap-2">
-            <KeyRound className="w-4 h-4 text-amber-400" />
+            <KeyRound className="w-4 h-4 text-amber-400 shrink-0" />
             {statusMsg}
           </span>
-          <button onClick={() => setStatusMsg('')} className="text-xs underline">Cerrar</button>
+          <button onClick={() => setStatusMsg('')} className="text-xs underline ml-4">Cerrar</button>
         </div>
       )}
 
@@ -89,38 +144,54 @@ export default function ReceptionistView({
             <UserPlus className="w-5 h-5 text-amber-400" />
             {editingClient ? 'Modificar Titular' : 'Alta de Cliente en Taller'}
           </h2>
-          <input
-            type="text"
-            placeholder="Nombre y Apellido"
-            value={clientForm.nombre_completo}
-            onChange={(e) => setClientForm({ ...clientForm, nombre_completo: e.target.value })}
-            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
-            required
-          />
-          <input
-            type="text"
-            placeholder="N° de Documento (será su contraseña inicial)"
-            value={clientForm.dni}
-            onChange={(e) => setClientForm({ ...clientForm, dni: e.target.value })}
-            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white font-mono"
-            required
-          />
-          <input
-            type="text"
-            placeholder="Teléfono de contacto"
-            value={clientForm.telefono}
-            onChange={(e) => setClientForm({ ...clientForm, telefono: e.target.value })}
-            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
-            required
-          />
-          <input
-            type="email"
-            placeholder="Correo electrónico (usuario de login)"
-            value={clientForm.email}
-            onChange={(e) => setClientForm({ ...clientForm, email: e.target.value })}
-            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
-            required
-          />
+          <div>
+            <input
+              type="text"
+              placeholder="Nombre y Apellido (solo letras)"
+              value={clientForm.nombre_completo}
+              onChange={(e) =>
+                setClientForm({ ...clientForm, nombre_completo: sanitizeOnlyLetters(e.target.value) })
+              }
+              className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
+              required
+            />
+          </div>
+          <div>
+            <input
+              type="text"
+              inputMode="numeric"
+              placeholder="DNI Argentino (7 a 8 números, sin puntos)"
+              value={clientForm.dni}
+              onChange={(e) =>
+                setClientForm({ ...clientForm, dni: sanitizeOnlyDigits(e.target.value, 8) })
+              }
+              className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white font-mono"
+              required
+            />
+          </div>
+          <div>
+            <input
+              type="tel"
+              inputMode="tel"
+              placeholder="Teléfono (solo números, ej: +54 9 261...)"
+              value={clientForm.telefono}
+              onChange={(e) =>
+                setClientForm({ ...clientForm, telefono: sanitizePhone(e.target.value) })
+              }
+              className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white font-mono"
+              required
+            />
+          </div>
+          <div>
+            <input
+              type="email"
+              placeholder="Correo electrónico (usuario de login)"
+              value={clientForm.email}
+              onChange={(e) => setClientForm({ ...clientForm, email: e.target.value.slice(0, 80) })}
+              className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
+              required
+            />
+          </div>
           <div className="flex gap-2">
             <button
               type="submit"
@@ -161,43 +232,44 @@ export default function ReceptionistView({
           <div className="grid grid-cols-2 gap-2">
             <input
               type="text"
-              placeholder="Patente (Ej: AF123BC)"
+              placeholder="Patente (AF123BC / ABC123)"
               value={vehicleForm.patente}
-              onChange={(e) => setVehicleForm({ ...vehicleForm, patente: e.target.value })}
+              onChange={(e) => setVehicleForm({ ...vehicleForm, patente: sanitizePlate(e.target.value) })}
               className="bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white uppercase font-mono"
               required
             />
             <input
-              type="number"
-              placeholder="Kilometraje actual"
+              type="text"
+              inputMode="numeric"
+              placeholder="Kilometraje (0 - 2M)"
               value={vehicleForm.kilometraje}
-              onChange={(e) => setVehicleForm({ ...vehicleForm, kilometraje: e.target.value })}
-              className="bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
+              onChange={(e) => setVehicleForm({ ...vehicleForm, kilometraje: sanitizeOnlyDigits(e.target.value, 7) })}
+              className="bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white font-mono"
               required
             />
           </div>
           <input
             type="text"
-            placeholder="N° de Chasis / VIN"
+            placeholder="VIN / Chasis (8 a 17 caract. sin I, O, Q)"
             value={vehicleForm.vin}
-            onChange={(e) => setVehicleForm({ ...vehicleForm, vin: e.target.value })}
-            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white font-mono"
+            onChange={(e) => setVehicleForm({ ...vehicleForm, vin: sanitizeVin(e.target.value) })}
+            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white font-mono uppercase"
             required
           />
           <div className="grid grid-cols-2 gap-2">
             <input
               type="text"
-              placeholder="Marca"
+              placeholder="Marca (Ej: Toyota)"
               value={vehicleForm.marca}
-              onChange={(e) => setVehicleForm({ ...vehicleForm, marca: e.target.value })}
+              onChange={(e) => setVehicleForm({ ...vehicleForm, marca: sanitizeTextSpec(e.target.value, 30) })}
               className="bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
               required
             />
             <input
               type="text"
-              placeholder="Modelo"
+              placeholder="Modelo (Ej: Hilux)"
               value={vehicleForm.modelo}
-              onChange={(e) => setVehicleForm({ ...vehicleForm, modelo: e.target.value })}
+              onChange={(e) => setVehicleForm({ ...vehicleForm, modelo: sanitizeTextSpec(e.target.value, 35) })}
               className="bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
               required
             />
@@ -206,7 +278,7 @@ export default function ReceptionistView({
             type="text"
             placeholder="Motorización (Ej: 2.8L TDI)"
             value={vehicleForm.motorizacion}
-            onChange={(e) => setVehicleForm({ ...vehicleForm, motorizacion: e.target.value })}
+            onChange={(e) => setVehicleForm({ ...vehicleForm, motorizacion: sanitizeTextSpec(e.target.value, 35) })}
             className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
             required
           />
@@ -219,10 +291,14 @@ export default function ReceptionistView({
         </form>
 
         <div className="bg-slate-900 border border-slate-800 p-5 rounded-xl space-y-3">
-          <h2 className="text-white font-bold text-base">Credenciales Automáticas</h2>
-          <p className="text-xs text-slate-400 leading-relaxed">
-            Al dar de alta un cliente en recepción, el sistema crea su cuenta de acceso utilizando su <strong>correo electrónico</strong> y adjudica su <strong>DNI como contraseña inicial</strong>. Luego el cliente puede actualizarla desde su perfil.
-          </p>
+          <h2 className="text-white font-bold text-base">Reglas de Validación Activas</h2>
+          <ul className="text-xs text-slate-400 space-y-1.5 list-disc pl-4">
+            <li><strong>DNI Argentino:</strong> Exclusivamente numérico de 7 u 8 dígitos (adjudicado como clave inicial).</li>
+            <li><strong>Nombre:</strong> Solo caracteres alfabéticos (sin números).</li>
+            <li><strong>Teléfono:</strong> Solo números y prefijo internacional (8 a 15 dígitos).</li>
+            <li><strong>Patente:</strong> Formatos Mercosur (<code className="text-amber-300">AA123BB</code>), tradicional (<code className="text-amber-300">ABC123</code>) o internacional hasta 8 caracteres sin duplicados.</li>
+            <li><strong>VIN / Chasis:</strong> Norma ISO 3779 (8 a 17 caracteres, excluyendo I, O, Q).</li>
+          </ul>
           <div className="grid grid-cols-2 gap-3 pt-2">
             <div className="bg-slate-950 border border-slate-800 p-3.5 rounded-xl">
               <span className="text-xs text-slate-400">Clientes Activos</span>
